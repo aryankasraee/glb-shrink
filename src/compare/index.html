@@ -1,0 +1,226 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>glb-shrink compare</title>
+<style>
+  :root { --bg: #f6f6f4; --fg: #1c1c1a; --muted: #6b6b66; --line: #ddddd8; --ok: #1f7a3a; --warn: #a66300; --bad: #b3261e; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #171716; --fg: #ececea; --muted: #9a9a94; --line: #33332f; --ok: #5ccf7c; --warn: #e5a443; --bad: #ff7a70; } }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 14px/1.45 system-ui, sans-serif; }
+  main { max-width: 1320px; margin: 0 auto; padding: 24px 16px 48px; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  .muted { color: var(--muted); }
+  #summary { overflow-x: auto; }
+  table { border-collapse: collapse; margin: 16px 0; }
+  th, td { text-align: left; padding: 6px 14px 6px 0; border-bottom: 1px solid var(--line); font-variant-numeric: tabular-nums; }
+  .ok { color: var(--ok); } .warn { color: var(--warn); } .bad { color: var(--bad); }
+  .view { margin: 28px 0; }
+  .pair { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .pair canvas { width: 100%; height: auto; display: block; border: 1px solid var(--line); }
+  .pair figcaption { color: var(--muted); font-size: 12px; margin-bottom: 4px; }
+  figure { margin: 0; }
+  #stage { position: absolute; left: -10000px; }
+</style>
+<script type="importmap">{ "imports": { "three": "/three/build/three.module.js", "three/addons/": "/three/examples/jsm/" } }</script>
+</head>
+<body>
+<main>
+  <h1>glb-shrink compare</h1>
+  <div id="files" class="muted"></div>
+  <p id="status">loading…</p>
+  <div id="summary"></div>
+  <div id="views"></div>
+</main>
+<script type="module">
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { DRACOLoader } from 'three/addons/loaders/DRACOLoader.js';
+import { KTX2Loader } from 'three/addons/loaders/KTX2Loader.js';
+import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js';
+import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
+
+// Fixed 720p frame: the score answers "would a viewer on a 720p screen notice?"
+const W = 1280, H = 720;
+const $ = (id) => document.getElementById(id);
+const fmt = (b) => (b >= 1e6 ? (b / 1e6).toFixed(2) + ' MB' : (b / 1e3).toFixed(1) + ' KB');
+
+const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
+renderer.setPixelRatio(1);
+renderer.setSize(W, H);
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.domElement.id = 'stage';
+document.body.append(renderer.domElement);
+const gl = renderer.getContext();
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x202020);
+scene.environment = new THREE.PMREMGenerator(renderer).fromScene(new RoomEnvironment(), 0.04).texture;
+const sun = new THREE.DirectionalLight(0xffffff, 2);
+sun.position.set(3, 5, 4);
+scene.add(sun);
+const camera = new THREE.PerspectiveCamera(40, W / H, 0.01, 1000);
+
+const loader = new GLTFLoader()
+  .setDRACOLoader(new DRACOLoader().setDecoderPath('/three/examples/jsm/libs/draco/gltf/'))
+  .setKTX2Loader(new KTX2Loader().setTranscoderPath('/three/examples/jsm/libs/basis/').detectSupport(renderer))
+  .setMeshoptDecoder(MeshoptDecoder);
+
+function makeViews(box) {
+  const c = box.getCenter(new THREE.Vector3());
+  const s = box.getSize(new THREE.Vector3()).length();
+  const at = (x, y, z, d) => c.clone().add(new THREE.Vector3(x, y, z).normalize().multiplyScalar(s * d));
+  const front = at(0.9, 0.6, 1.1, 1.15), side = at(-1, 0.45, 0.6, 1.15);
+  return [
+    { name: 'full', pos: front, target: c, fov: 40 },
+    { name: 'side', pos: side, target: c, fov: 40 },
+    { name: 'zoom 2x', pos: front, target: c, fov: 20 },
+    { name: 'zoom 4x', pos: front, target: c.clone().add(new THREE.Vector3(0, 0.12 * s, 0)), fov: 10 },
+    { name: 'zoom 4x side', pos: side, target: c.clone().add(new THREE.Vector3(0.1 * s, 0, 0)), fov: 10 },
+  ];
+}
+
+function shoot(view) {
+  camera.position.copy(view.pos);
+  camera.fov = view.fov;
+  camera.updateProjectionMatrix();
+  camera.lookAt(view.target);
+  renderer.render(scene, camera);
+  const px = new Uint8Array(W * H * 4);
+  gl.readPixels(0, 0, W, H, gl.RGBA, gl.UNSIGNED_BYTE, px);
+  return px;
+}
+
+async function load(url) {
+  const t0 = performance.now();
+  const buf = await (await fetch(url)).arrayBuffer();
+  const gltf = await loader.parseAsync(buf, '');
+  scene.add(gltf.scene);
+  renderer.render(scene, camera);
+  gl.finish();
+  return { root: gltf.scene, ms: Math.round(performance.now() - t0), ...stats(gltf.scene) };
+}
+
+function stats(root) {
+  let triangles = 0, vram = 0;
+  const seen = new Set();
+  root.traverse((o) => {
+    if (!o.isMesh) return;
+    const g = o.geometry;
+    triangles += (g.index ? g.index.count : g.attributes.position.count) / 3;
+    for (const k of Object.keys(o.material)) {
+      const t = o.material[k];
+      if (!t?.isTexture || seen.has(t)) continue;
+      seen.add(t);
+      vram += t.isCompressedTexture
+        ? t.mipmaps.reduce((s, m) => s + m.data.byteLength, 0)
+        : t.image.width * t.image.height * 4 * (4 / 3);
+    }
+  });
+  return { triangles, vram };
+}
+
+function unload(root) {
+  scene.remove(root);
+  root.traverse((o) => {
+    if (!o.isMesh) return;
+    o.geometry.dispose();
+    for (const k of Object.keys(o.material)) if (o.material[k]?.isTexture) o.material[k].dispose();
+    o.material.dispose();
+  });
+}
+
+// PSNR and SSIM (8x8 windows, stride 4) over pixels that show the model in either frame.
+function score(a, b) {
+  const bg = [a[0], a[1], a[2]];
+  const isBg = (k) => a[k * 4] === bg[0] && a[k * 4 + 1] === bg[1] && a[k * 4 + 2] === bg[2]
+    && b[k * 4] === bg[0] && b[k * 4 + 1] === bg[1] && b[k * 4 + 2] === bg[2];
+  const luma = (p) => { const l = new Float32Array(W * H); for (let i = 0; i < W * H; i++) l[i] = 0.299 * p[i * 4] + 0.587 * p[i * 4 + 1] + 0.114 * p[i * 4 + 2]; return l; };
+  const la = luma(a), lb = luma(b);
+  let se = 0, n = 0;
+  for (let k = 0; k < W * H; k++) {
+    if (isBg(k)) continue;
+    for (let c = 0; c < 3; c++) { const d = a[k * 4 + c] - b[k * 4 + c]; se += d * d; }
+    n += 3;
+  }
+  const C1 = (0.01 * 255) ** 2, C2 = (0.03 * 255) ** 2;
+  let sum = 0, windows = 0;
+  for (let y = 0; y + 8 <= H; y += 4) for (let x = 0; x + 8 <= W; x += 4) {
+    if (isBg(y * W + x) && isBg(y * W + x + 7) && isBg((y + 7) * W + x) && isBg((y + 7) * W + x + 7)) continue;
+    let ma = 0, mb = 0;
+    for (let j = 0; j < 8; j++) for (let i = 0; i < 8; i++) { const k = (y + j) * W + x + i; ma += la[k]; mb += lb[k]; }
+    ma /= 64; mb /= 64;
+    let va = 0, vb = 0, cov = 0;
+    for (let j = 0; j < 8; j++) for (let i = 0; i < 8; i++) {
+      const k = (y + j) * W + x + i, da = la[k] - ma, db = lb[k] - mb;
+      va += da * da; vb += db * db; cov += da * db;
+    }
+    va /= 63; vb /= 63; cov /= 63;
+    sum += ((2 * ma * mb + C1) * (2 * cov + C2)) / ((ma * ma + mb * mb + C1) * (va + vb + C2));
+    windows++;
+  }
+  return { ssim: windows ? sum / windows : 1, psnr: n && se ? 10 * Math.log10((255 * 255) / (se / n)) : 99 };
+}
+
+function toCanvas(px) {
+  const c = document.createElement('canvas');
+  c.width = W; c.height = H;
+  const ctx = c.getContext('2d');
+  const img = ctx.createImageData(W, H);
+  for (let y = 0; y < H; y++) img.data.set(px.subarray((H - 1 - y) * W * 4, (H - y) * W * 4), y * W * 4);
+  ctx.putImageData(img, 0, 0);
+  return c;
+}
+
+function verdict(ssim) {
+  if (ssim >= 0.99) return ['ok', 'looks the same'];
+  if (ssim >= 0.97) return ['warn', 'close, check by eye'];
+  return ['bad', 'visible difference'];
+}
+
+async function run() {
+  const meta = await (await fetch('/meta.json')).json();
+  $('files').textContent = `A: ${meta.a.name} (${fmt(meta.a.bytes)})  ·  B: ${meta.b.name} (${fmt(meta.b.bytes)})`;
+
+  $('status').textContent = 'rendering A…';
+  const a = await load('/a.glb');
+  const views = makeViews(new THREE.Box3().setFromObject(a.root));
+  const shotsA = views.map(shoot);
+  unload(a.root);
+
+  $('status').textContent = 'rendering B…';
+  const b = await load('/b.glb');
+  const shotsB = views.map(shoot);
+  unload(b.root);
+
+  const rows = views.map((v, i) => ({ view: v.name, ...score(shotsA[i], shotsB[i]) }));
+  window.compareResults = { a: { ...meta.a, ms: a.ms, triangles: a.triangles, vram: a.vram }, b: { ...meta.b, ms: b.ms, triangles: b.triangles, vram: b.vram }, views: rows };
+
+  $('status').textContent = 'Scores at 1280×720. SSIM 1.0 = identical; ≥ 0.99 is hard to tell apart.';
+  $('summary').innerHTML = `
+    <table>
+      <tr><th></th><th>file</th><th>gpu memory</th><th>triangles</th><th>load + first frame</th></tr>
+      <tr><td>A</td><td>${fmt(meta.a.bytes)}</td><td>${fmt(a.vram)}</td><td>${a.triangles}</td><td>${a.ms} ms</td></tr>
+      <tr><td>B</td><td>${fmt(meta.b.bytes)}</td><td>${fmt(b.vram)}</td><td>${b.triangles}</td><td>${b.ms} ms</td></tr>
+    </table>
+    <table>
+      <tr><th>view</th><th>SSIM</th><th>PSNR</th><th></th></tr>
+      ${rows.map((r) => { const [cls, label] = verdict(r.ssim); return `<tr><td>${r.view}</td><td>${r.ssim.toFixed(4)}</td><td>${r.psnr.toFixed(1)} dB</td><td class="${cls}">${label}</td></tr>`; }).join('')}
+    </table>`;
+
+  views.forEach((v, i) => {
+    const section = document.createElement('section');
+    section.className = 'view';
+    section.innerHTML = `<h3>${v.name}</h3><div class="pair"><figure><figcaption>A · ${meta.a.name}</figcaption></figure><figure><figcaption>B · ${meta.b.name}</figcaption></figure></div>`;
+    const [fa, fb] = section.querySelectorAll('figure');
+    fa.append(toCanvas(shotsA[i]));
+    fb.append(toCanvas(shotsB[i]));
+    $('views').append(section);
+  });
+}
+
+run().catch((err) => { $('status').textContent = 'error: ' + err.message; console.error(err); });
+</script>
+</body>
+</html>
