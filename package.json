@@ -4,6 +4,7 @@
   "description": "Shrink glTF/GLB models for mobile web: AVIF textures, Draco geometry, optional size budget.",
   "type": "module",
   "private": true,
+  "license": "MIT",
   "bin": {
     "glb-shrink": "bin/glb-shrink.js"
   },

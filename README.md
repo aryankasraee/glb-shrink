@@ -151,3 +151,7 @@ npm test
 
 Tests build a small synthetic model and cover presets, the size budget, the metallicRoughness
 rule, WebP output, re-compressing an already compressed file, and the HTTP service.
+
+## License
+
+MIT, see [LICENSE](LICENSE).
